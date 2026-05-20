@@ -108,10 +108,11 @@ fi
 systemctl enable --now tailscaled
 
 if ! tailscale status >/dev/null 2>&1; then
-  # `--advertise-tags=tag:pawpad` is omitted by default. If you want it,
-  # first add `tag:pawpad` to tagOwners in your tailnet ACL, then add
-  # `--advertise-tags=tag:pawpad` back to the `tailscale up` command below.
-  tailscale up \
+  # `--reset` clears any state from a previous failed `up` attempt (otherwise
+  # tailscaled remembers previous flags and rejects new invocations).
+  # `--advertise-tags=tag:pawpad` is omitted by default — to enable, first add
+  # `tag:pawpad` to tagOwners in your tailnet ACL.
+  tailscale up --reset \
     --authkey="${tailscale_authkey}" \
     --hostname="${tailscale_hostname}" \
     --ssh
