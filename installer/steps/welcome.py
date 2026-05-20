@@ -1,34 +1,45 @@
-"""Welcome screen — explain what's about to happen.
-
-Shows expected duration, list of credentials we're about to gather, and the
-final outcome (VM running on tailnet, bot in your Discord guild).
-"""
+"""Welcome screen + load .env.dev defaults if present."""
 
 from __future__ import annotations
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Confirm
+from pathlib import Path
 
-console = Console()
+from installer._helpers import confirm, load_env_dev_defaults, section
 
 
 def run(state: dict) -> None:
-    console.print(
-        Panel.fit(
-            "[bold]pawpad installer[/bold]\n\n"
-            "About to gather credentials and provision a GCP VM that hosts a Discord\n"
-            "bot orchestrating Claude Agent SDK sessions per channel.\n\n"
-            "Expected duration: [bold]~15 minutes[/bold].\n\n"
-            "You'll need (we'll walk through each):\n"
-            "  • GCP service-account JSON (or gcloud auth login)\n"
-            "  • A GCP project with billing enabled\n"
-            "  • Tailscale auth key\n"
-            "  • GitHub auth (gh CLI on this machine)\n"
-            "  • A Discord bot token + guild ID\n"
-            "  • An Anthropic API key\n",
-            border_style="cyan",
-        )
+    section(
+        "pawpad installer",
+        "About to provision a GCP VM hosting a Discord bot that orchestrates\n"
+        "Claude Agent SDK sessions per channel.\n\n"
+        "Expected duration: [bold]~15 minutes[/bold].\n\n"
+        "You'll need (we walk through each):\n"
+        "  • GCP project + auth (gcloud login or service-account JSON)\n"
+        "  • Tailscale auth key\n"
+        "  • GitHub auth (gh CLI on this machine)\n"
+        "  • Discord bot token + guild ID\n"
+        "  • Anthropic API key\n",
     )
-    if not Confirm.ask("Ready to start?", default=True):
+
+    repo_root = Path(__file__).resolve().parents[2]
+    load_env_dev_defaults(state, repo_root)
+
+    if any(state.get(k) for k in ("discord_token", "anthropic_api_key", "tailscale_authkey")):
+        section(
+            ".env.dev detected",
+            "Loaded existing values for: "
+            + ", ".join(
+                k
+                for k in (
+                    "discord_token",
+                    "discord_guild_id",
+                    "anthropic_api_key",
+                    "tailscale_authkey",
+                    "gcp_project_id",
+                )
+                if state.get(k)
+            ),
+        )
+
+    if not confirm("Ready to start?", default=True):
         raise KeyboardInterrupt()

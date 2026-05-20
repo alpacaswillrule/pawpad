@@ -67,6 +67,17 @@ class Budget:
 
     def open(self) -> None:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._open_inner()
+        except sqlite3.DatabaseError:
+            logger.exception("budget ledger at %s is corrupt; rotating", self.ledger_path)
+            stamp = int(time.time())
+            self.ledger_path.rename(
+                self.ledger_path.with_suffix(f".corrupt.{stamp}.sqlite")
+            )
+            self._open_inner()
+
+    def _open_inner(self) -> None:
         self._db = sqlite3.connect(
             self.ledger_path,
             check_same_thread=False,
@@ -116,7 +127,18 @@ class Budget:
         cache_r: int,
         cache_w: int,
     ) -> float:
-        rates = PRICING.get(model.split("[")[0].strip(), DEFAULT_PRICING)
+        # Anthropic ships model IDs like `claude-opus-4-7-20251022` or
+        # `claude-opus-4-7[1m]`. Match on longest prefix in the pricing table.
+        m = model or ""
+        rates = DEFAULT_PRICING
+        for key in sorted(PRICING, key=len, reverse=True):
+            if m.startswith(key):
+                rates = PRICING[key]
+                break
+        in_tok = max(0, in_tok)
+        out_tok = max(0, out_tok)
+        cache_r = max(0, cache_r)
+        cache_w = max(0, cache_w)
         return (
             in_tok * rates["in"]
             + out_tok * rates["out"]

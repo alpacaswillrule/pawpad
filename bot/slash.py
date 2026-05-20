@@ -122,13 +122,14 @@ def register_slash_commands(tree: app_commands.CommandTree, bot: "PawpadBot") ->
         description="Archive this channel's workspace + Obsidian dir (keeps the Discord channel).",
     )
     async def archive_cmd(interaction: discord.Interaction) -> None:
-        if interaction.channel_id not in bot.sessions.sessions:
+        cid = interaction.channel_id
+        if cid is None or cid not in bot.sessions.sessions:
             await interaction.response.send_message(
                 "no session bound to this channel.", ephemeral=True
             )
             return
         await interaction.response.send_message("archiving…")
-        await bot.sessions.archive_channel(interaction.channel_id, source="manual")
+        await bot.sessions.archive_channel(cid, source="manual")
         await interaction.followup.send("archived. session removed; channel preserved.")
 
     @tree.command(

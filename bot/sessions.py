@@ -151,7 +151,7 @@ class SessionManager:
         self.slot_sem = asyncio.Semaphore(soft_cap)
         self.holders: set[int] = set()  # channel_ids currently holding a slot
         self._idle_task: asyncio.Task | None = None
-        self._daily_summary_task: asyncio.Task | None = None
+        self._store_lock = asyncio.Lock()
 
     # ---- lifecycle ---------------------------------------------------------
 
@@ -159,13 +159,12 @@ class SessionManager:
         self._idle_task = asyncio.create_task(self._idle_loop())
 
     async def stop_background(self) -> None:
-        for t in (self._idle_task, self._daily_summary_task):
-            if t is not None:
-                t.cancel()
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
+        if self._idle_task is not None:
+            self._idle_task.cancel()
+            try:
+                await self._idle_task
+            except BaseException:  # expected during shutdown
+                pass
 
     async def bootstrap_existing_channels(self, guild: discord.Guild) -> None:
         category = _find_projects_category(guild, self.PROJECTS_CATEGORY)
@@ -287,7 +286,7 @@ class SessionManager:
         session.drainer = asyncio.create_task(self._drain(session))
 
     async def _drain(self, session: ChannelSession) -> None:
-        """Run turns back-to-back until pending is empty."""
+        """Run turns back-to-back until pending is empty or pause flips state."""
         try:
             while session.pending and session.state != "paused":
                 if self.budget.is_over_cap():
@@ -303,25 +302,40 @@ class SessionManager:
                 except Exception as exc:
                     logger.exception("turn failed for #%s", session.channel_name)
                     await self.audit.post_crash(session.channel_name, exc)
+                    # Drop the dead client so the next turn rebuilds it
+                    await self._force_disconnect(session)
         finally:
             session.drainer = None
+            # If we exited because pause was flipped mid-turn, release the slot now.
+            if session.state == "paused":
+                await self._force_disconnect(session)
 
     # ---- slot management ---------------------------------------------------
 
     async def _acquire_slot(self, session: ChannelSession) -> bool:
+        """Acquire a concurrency slot, marking the session 'queued' if we wait."""
         if session.channel_id in self.holders:
             return True
-        if self.slot_sem.locked() or self.slot_sem._value == 0:  # noqa: SLF001
+        # Try non-blocking first; if it would block, mark queued and wait.
+        try:
+            await asyncio.wait_for(self.slot_sem.acquire(), timeout=0)
+        except asyncio.TimeoutError:
             prev = session.state
             session.state = "queued"
-            await self.slot_sem.acquire()
+            try:
+                await self.slot_sem.acquire()
+            except asyncio.CancelledError:
+                if session.state == "queued":
+                    session.state = prev
+                raise
             if session.state == "paused":
                 self.slot_sem.release()
                 return False
-            session.state = prev if prev != "queued" else "open"
-        else:
-            await self.slot_sem.acquire()
+        if session.state != "paused":
             session.state = "open"
+        else:
+            self.slot_sem.release()
+            return False
         self.holders.add(session.channel_id)
         return True
 
@@ -329,6 +343,34 @@ class SessionManager:
         if session.channel_id in self.holders:
             self.holders.discard(session.channel_id)
             self.slot_sem.release()
+
+    async def _save_session_id(self, channel_id: int, session_id: str) -> None:
+        async with self._store_lock:
+            SESSION_STORE.parent.mkdir(parents=True, exist_ok=True)
+            store = _load_session_store()
+            store[str(channel_id)] = session_id
+            SESSION_STORE.write_text(json.dumps(store, indent=2, sort_keys=True))
+
+    async def _forget_session_id(self, channel_id: int) -> None:
+        async with self._store_lock:
+            if not SESSION_STORE.exists():
+                return
+            store = _load_session_store()
+            store.pop(str(channel_id), None)
+            SESSION_STORE.write_text(json.dumps(store, indent=2, sort_keys=True))
+
+    async def _force_disconnect(self, session: ChannelSession) -> None:
+        """Close the SDK client and free the slot. Safe to call repeatedly."""
+        client = session.client
+        session.client = None
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("disconnect (force) failed: %s", exc)
+        if session.state == "open":
+            session.state = "closed"
+        self._release_slot(session)
 
     # ---- the turn ----------------------------------------------------------
 
@@ -339,12 +381,18 @@ class SessionManager:
                 logger.warning("channel %s vanished mid-turn", session.channel_id)
                 return
 
-            await self._ensure_client(session)
+            try:
+                await self._ensure_client(session)
+            except Exception:
+                # Connect failed — release the slot we hold; pending is intact.
+                self._release_slot(session)
+                raise
             assert session.client is not None
 
-            # drain all pending messages into the prompt
-            prompt = "\n\n".join(session.pending)
+            # Snapshot pending; restore on early failure so messages aren't lost.
+            drained = list(session.pending)
             session.pending.clear()
+            prompt = "\n\n".join(drained)
 
             footer = TurnFooter(tool_count=0, elapsed_seconds=0.0, usd=0.0)
             text_parts: list[str] = []
@@ -352,26 +400,37 @@ class SessionManager:
             model: str = "claude-opus-4-7"
             t0 = time.monotonic()
 
-            async with TypingHeartbeat(channel):
-                await session.client.query(prompt)
-                async for message in session.client.receive_response():
-                    if isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, ToolUseBlock):
-                                footer.tool_count += 1
-                                session.mark_tool()
-                            elif isinstance(block, TextBlock):
-                                text_parts.append(block.text)
-                                session.mark_token()
-                    elif isinstance(message, ResultMessage):
-                        if message.session_id:
-                            session.session_id = message.session_id
-                            _save_session_id(session.channel_id, message.session_id)
-                        usage = getattr(message, "usage", None) or {}
-                        model = getattr(message, "model", model) or model
-                        if not text_parts and getattr(message, "result", None):
-                            text_parts.append(message.result)
-                        break
+            got_result = False
+            try:
+                async with TypingHeartbeat(channel):
+                    await session.client.query(prompt)
+                    async for message in session.client.receive_response():
+                        if isinstance(message, AssistantMessage):
+                            for block in message.content:
+                                if isinstance(block, ToolUseBlock):
+                                    footer.tool_count += 1
+                                    session.mark_tool()
+                                elif isinstance(block, TextBlock):
+                                    text_parts.append(block.text)
+                                    session.mark_token()
+                        elif isinstance(message, ResultMessage):
+                            got_result = True
+                            if message.session_id:
+                                session.session_id = message.session_id
+                                await self._save_session_id(
+                                    session.channel_id, message.session_id
+                                )
+                            usage = getattr(message, "usage", None) or {}
+                            model = getattr(message, "model", model) or model
+                            if not text_parts and getattr(message, "result", None):
+                                text_parts.append(message.result)
+                            break
+            except Exception:
+                # Failure during the turn — restore pending so the user's messages
+                # aren't silently dropped. Outer except in _drain handles the post.
+                for line in reversed(drained):
+                    session.pending.appendleft(line)
+                raise
 
             footer.elapsed_seconds = time.monotonic() - t0
             session.last_turn_end_at = time.time()
@@ -468,13 +527,18 @@ class SessionManager:
             return False
         was = session.state
         session.state = "paused"
-        if session.client is not None:
+
+        if session.turn_lock.locked() and session.client is not None:
+            # turn in flight — ask SDK to wind down cleanly; the drainer's
+            # next iteration sees state=paused and exits, releasing the slot.
             try:
-                await session.client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
-            session.client = None
-        self._release_slot(session)
+                await session.client.interrupt()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("interrupt failed: %s", exc)
+        else:
+            # idle between turns — disconnect now and free the slot
+            await self._force_disconnect(session)
+
         logger.info("paused #%s (was %s)", session.channel_name, was)
         return True
 
@@ -496,29 +560,38 @@ class SessionManager:
             await self.pause(cid)
 
     async def archive_channel(self, channel_id: int, *, source: str = "manual") -> None:
-        session = self.sessions.pop(channel_id, None)
+        session = self.sessions.get(channel_id)
         if session is None:
             return
-        await self.pause(channel_id)  # closes client, releases slot
+        # 1. close client + release slot while session is still findable
+        await self.pause(channel_id)
+        # 2. now remove from active sessions
+        self.sessions.pop(channel_id, None)
+        # 3. run archive script (bounded)
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(self.scripts_root / "archive-project.sh"),
                 slugify(session.channel_name),
                 env={
                     "HOME": str(Path.home()),
-                    "PATH": "/usr/bin:/bin:/usr/local/bin",
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
                     "WORKSPACES_ROOT": str(self.workspaces_root),
                     "VAULT_ROOT": str(self.vault_root),
                 },
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            out, err = await proc.communicate()
-            if proc.returncode != 0:
-                logger.error("archive script failed: %s", err.decode())
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+                if proc.returncode != 0:
+                    logger.error("archive script failed: %s", err.decode())
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                logger.error("archive script timed out for #%s", session.channel_name)
         except Exception:
             logger.exception("archive script crashed")
-        _forget_session_id(channel_id)
+        await self._forget_session_id(channel_id)
         await self.audit.post_archived(session.channel_name, "_archived/")
 
     # ---- idle watcher ------------------------------------------------------
@@ -564,7 +637,12 @@ class SessionManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await proc.communicate()
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise RuntimeError("new-project.sh timed out after 3 minutes") from None
         if proc.returncode != 0:
             raise RuntimeError(
                 f"new-project.sh failed (rc={proc.returncode}): {err.decode()[:400]}"
@@ -599,18 +677,3 @@ def _load_session_store() -> dict[str, str]:
     except Exception:  # noqa: BLE001
         logger.warning("session store at %s is unreadable, ignoring", SESSION_STORE)
         return {}
-
-
-def _save_session_id(channel_id: int, session_id: str) -> None:
-    SESSION_STORE.parent.mkdir(parents=True, exist_ok=True)
-    store = _load_session_store()
-    store[str(channel_id)] = session_id
-    SESSION_STORE.write_text(json.dumps(store, indent=2, sort_keys=True))
-
-
-def _forget_session_id(channel_id: int) -> None:
-    if not SESSION_STORE.exists():
-        return
-    store = _load_session_store()
-    store.pop(str(channel_id), None)
-    SESSION_STORE.write_text(json.dumps(store, indent=2, sort_keys=True))

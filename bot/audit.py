@@ -88,10 +88,12 @@ class Audit:
 
     async def post_crash(self, channel_name: str, exc: BaseException) -> None:
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        if len(tb) > 1600:
-            tb = tb[:1600] + "\n... (truncated)"
+        # Backticks in the traceback would break our fenced code block; replace with U+02CB.
+        safe_tb = tb.replace("```", "ˋˋˋ")
+        if len(safe_tb) > 1600:
+            safe_tb = safe_tb[:1600] + "\n... (truncated)"
         await self.post(
-            f"`✗` **crash in #{channel_name}**\n```\n{tb}\n```"
+            f"`✗` **crash in #{channel_name}**\n```\n{safe_tb}\n```"
         )
 
     async def post_daily_summary(

@@ -24,8 +24,9 @@ variable "disk_size_gb" {
 }
 
 variable "disk_type" {
-  type    = string
-  default = "pd-balanced" # pd-standard | pd-balanced | pd-ssd
+  type        = string
+  default     = "pd-balanced"
+  description = "pd-standard | pd-balanced | pd-ssd"
 }
 
 variable "tailscale_authkey" {
@@ -33,12 +34,30 @@ variable "tailscale_authkey" {
   sensitive = true
 }
 
+variable "ssh_user" {
+  type        = string
+  default     = "pawpad"
+  description = "OS user for initial SSH login (also runs the bot)"
+}
+
 variable "ssh_pub_key" {
   type        = string
-  description = "SSH public key for the initial deploy login (subsequent ops go via Tailscale SSH)"
+  description = "SSH public key for initial deploy login (use Tailscale SSH for ongoing access)"
 }
 
 variable "instance_name" {
   type    = string
   default = "pawpad-vm"
+}
+
+variable "repo_url" {
+  type        = string
+  default     = "https://github.com/alpacaswillrule/pawpad.git"
+  description = "Repo to clone onto the VM at /opt/pawpad"
+}
+
+variable "repo_ref" {
+  type        = string
+  default     = "main"
+  description = "Branch or tag to check out"
 }

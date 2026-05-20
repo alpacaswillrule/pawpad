@@ -178,38 +178,28 @@ async def post_chunked(channel: discord.abc.Messageable, text: str) -> None:
 
 
 class TypingHeartbeat:
-    """Context manager that keeps the typing indicator alive for long turns.
+    """Async context manager that holds the channel typing indicator.
 
-    Discord's typing indicator only lasts ~10 seconds. We refresh every 8s.
+    Uses discord.py 2.x's `channel.typing()` which auto-refreshes internally
+    (the 10s expiry is handled by the context manager).
     """
 
     def __init__(self, channel: discord.abc.Messageable) -> None:
         self._channel = channel
-        self._task: asyncio.Task | None = None
-        self._stop = asyncio.Event()
+        self._cm = None  # type: ignore[assignment]
 
     async def __aenter__(self) -> "TypingHeartbeat":
-        self._task = asyncio.create_task(self._loop())
+        try:
+            self._cm = self._channel.typing()
+            await self._cm.__aenter__()
+        except discord.HTTPException as exc:
+            logger.warning("typing() failed: %s", exc)
+            self._cm = None
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        self._stop.set()
-        if self._task is not None:
+        if self._cm is not None:
             try:
-                await asyncio.wait_for(self._task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                self._task.cancel()
-
-    async def _loop(self) -> None:
-        try:
-            while not self._stop.is_set():
-                try:
-                    await self._channel.trigger_typing()
-                except discord.HTTPException as exc:
-                    logger.warning("trigger_typing failed: %s", exc)
-                try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=8.0)
-                except asyncio.TimeoutError:
-                    continue
-        except asyncio.CancelledError:
-            pass
+                await self._cm.__aexit__(exc_type, exc, tb)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("typing() exit failed: %s", e)

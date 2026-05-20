@@ -18,6 +18,8 @@ Env (see .env.example):
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import signal
@@ -36,12 +38,30 @@ logger = logging.getLogger("pawpad.bot")
 PROJECTS_CATEGORY = "projects"
 
 
+SLASH_HASH_PATH = Path("~/.pawpad/slash_hash").expanduser()
+
+
 def make_intents() -> discord.Intents:
     intents = discord.Intents.default()
     intents.message_content = True
-    intents.members = True
     intents.guilds = True
     return intents
+
+
+def _slash_signature(tree: discord.app_commands.CommandTree) -> str:
+    """Hash the registered commands so we only re-sync when they change."""
+    sig = []
+    for cmd in tree.get_commands():
+        sig.append({
+            "name": cmd.name,
+            "description": getattr(cmd, "description", ""),
+            "params": [
+                {"name": p.name, "type": str(p.type), "required": p.required}
+                for p in (cmd.parameters if hasattr(cmd, "parameters") else [])
+            ],
+        })
+    blob = json.dumps(sig, sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()
 
 
 class PawpadBot(discord.Client):
@@ -78,11 +98,20 @@ class PawpadBot(discord.Client):
     async def setup_hook(self) -> None:
         self.budget.open()
         register_slash_commands(self.tree, self)
-        try:
-            await self.tree.sync(guild=discord.Object(id=self.guild_id))
-            logger.info("slash commands synced to guild %s", self.guild_id)
-        except discord.HTTPException as exc:
-            logger.warning("slash sync failed: %s", exc)
+
+        sig = _slash_signature(self.tree)
+        prev = SLASH_HASH_PATH.read_text().strip() if SLASH_HASH_PATH.exists() else ""
+        force = os.environ.get("PAWPAD_FORCE_SYNC") == "1"
+        if force or sig != prev:
+            try:
+                await self.tree.sync(guild=discord.Object(id=self.guild_id))
+                SLASH_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
+                SLASH_HASH_PATH.write_text(sig)
+                logger.info("slash commands synced to guild %s", self.guild_id)
+            except discord.HTTPException as exc:
+                logger.warning("slash sync failed: %s", exc)
+        else:
+            logger.info("slash commands unchanged; skipping sync")
 
     async def on_ready(self) -> None:
         logger.info(
