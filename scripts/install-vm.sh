@@ -47,6 +47,7 @@ COUCHDB_PASSWORD=$(get COUCHDB_PASSWORD)
 LIVESYNC_PASSPHRASE=$(get LIVESYNC_PASSPHRASE)
 PAWPAD_GH_OWNER=$(get PAWPAD_GH_OWNER)
 PAWPAD_DEFAULT_DAILY_CAP_USD=$(get PAWPAD_DEFAULT_DAILY_CAP_USD)
+GH_TOKEN=$(get GH_TOKEN)
 
 for var in DISCORD_TOKEN DISCORD_GUILD_ID ANTHROPIC_API_KEY \
            COUCHDB_USER COUCHDB_PASSWORD LIVESYNC_PASSPHRASE; do
@@ -60,29 +61,44 @@ PAWPAD_GH_OWNER=${PAWPAD_GH_OWNER:-alpacaswillrule}
 PAWPAD_DEFAULT_DAILY_CAP_USD=${PAWPAD_DEFAULT_DAILY_CAP_USD:-500}
 
 # --- write bot .env (root-readable only) -------------------------------------
+# Use printf instead of heredoc so secret values containing $ aren't expanded.
+
+write_env() {
+  local path="$1"
+  shift
+  sudo install -m 0600 -o ${PAWPAD_USER} -g ${PAWPAD_USER} /dev/null "$path"
+  local kv
+  for kv in "$@"; do
+    printf '%s\n' "$kv" | sudo tee -a "$path" >/dev/null
+  done
+}
 
 ENV_PATH=/opt/pawpad/.env
-sudo install -m 0600 -o ${PAWPAD_USER} -g ${PAWPAD_USER} /dev/null "$ENV_PATH"
-sudo tee "$ENV_PATH" >/dev/null <<EOF
-DISCORD_TOKEN=${DISCORD_TOKEN}
-DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
-ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-PAWPAD_WORKSPACES=${PAWPAD_HOME}/projects
-PAWPAD_VAULT=${PAWPAD_HOME}/obsidian-vault
-PAWPAD_GH_OWNER=${PAWPAD_GH_OWNER}
-PAWPAD_DEFAULT_DAILY_CAP_USD=${PAWPAD_DEFAULT_DAILY_CAP_USD}
-COUCHDB_USER=${COUCHDB_USER}
-COUCHDB_PASSWORD=${COUCHDB_PASSWORD}
-EOF
+write_env "$ENV_PATH" \
+  "DISCORD_TOKEN=$DISCORD_TOKEN" \
+  "DISCORD_GUILD_ID=$DISCORD_GUILD_ID" \
+  "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
+  "PAWPAD_WORKSPACES=$PAWPAD_HOME/projects" \
+  "PAWPAD_VAULT=$PAWPAD_HOME/obsidian-vault" \
+  "PAWPAD_GH_OWNER=$PAWPAD_GH_OWNER" \
+  "PAWPAD_DEFAULT_DAILY_CAP_USD=$PAWPAD_DEFAULT_DAILY_CAP_USD" \
+  "COUCHDB_USER=$COUCHDB_USER" \
+  "COUCHDB_PASSWORD=$COUCHDB_PASSWORD"
 
-# --- write livesync .env (only docker-compose reads this) --------------------
+# --- write livesync .env (docker-compose reads this) -------------------------
 
 LIVESYNC_ENV=/opt/pawpad/obsidian/livesync/.env
-sudo install -m 0600 -o ${PAWPAD_USER} -g ${PAWPAD_USER} /dev/null "$LIVESYNC_ENV"
-sudo tee "$LIVESYNC_ENV" >/dev/null <<EOF
-COUCHDB_USER=${COUCHDB_USER}
-COUCHDB_PASSWORD=${COUCHDB_PASSWORD}
-EOF
+write_env "$LIVESYNC_ENV" \
+  "COUCHDB_USER=$COUCHDB_USER" \
+  "COUCHDB_PASSWORD=$COUCHDB_PASSWORD"
+
+# --- save the LiveSync E2E passphrase locally so the operator can retrieve it -
+# (the passphrase is client-side; CouchDB itself doesn't use it)
+
+PASSPHRASE_PATH=$PAWPAD_HOME/.pawpad/livesync-passphrase.txt
+sudo -u $PAWPAD_USER mkdir -p "$(dirname "$PASSPHRASE_PATH")"
+sudo install -m 0600 -o ${PAWPAD_USER} -g ${PAWPAD_USER} /dev/null "$PASSPHRASE_PATH"
+printf '%s\n' "$LIVESYNC_PASSPHRASE" | sudo tee "$PASSPHRASE_PATH" >/dev/null
 
 # --- seed the obsidian vault if missing --------------------------------------
 
@@ -93,33 +109,31 @@ fi
 sudo -u ${PAWPAD_USER} mkdir -p "${PAWPAD_HOME}/projects"
 
 # --- install systemd units ---------------------------------------------------
+# v1: bot + livesync. Quartz is deferred (no package.json yet).
 
-for unit in jojo-bot.service livesync.service quartz.service; do
+for unit in jojo-bot.service livesync.service; do
   sudo install -m 0644 "/opt/pawpad/systemd/$unit" "/etc/systemd/system/$unit"
 done
 
 sudo systemctl daemon-reload
 
 # --- gh auth on the VM -------------------------------------------------------
-# The bot uses gh to create per-channel private repos. We don't have a GitHub
-# token from the operator (gh OAuth on a headless box is awkward). The
-# installer's `github` step will instead generate an SSH deploy key and add it
-# to the operator's GitHub via `gh ssh-key add` from their laptop, then the
-# VM can push via SSH. For repo *creation* (`gh repo create`), we need a token
-# — for now, the operator can `gh auth login` interactively over SSH after
-# install completes. This script doesn't fail on missing gh auth.
+# Reuse the operator's gh token (passed through state). The bot needs
+# `gh repo create` to scaffold per-channel private repos.
 
-sudo -u ${PAWPAD_USER} bash -c 'gh auth status' || \
-  echo "NOTE: gh not authed on VM yet. SSH in and run 'gh auth login' before creating channels."
+if [[ -n "$GH_TOKEN" ]]; then
+  # pipe token via stdin so it never appears in argv / ps
+  printf '%s' "$GH_TOKEN" | sudo -u ${PAWPAD_USER} gh auth login --hostname github.com --with-token
+  sudo -u ${PAWPAD_USER} gh auth setup-git 2>/dev/null || true
+  echo "gh authed on VM"
+else
+  echo "NOTE: no GH_TOKEN provided. SSH in and run 'gh auth login' before creating channels."
+fi
 
 # --- start the bot -----------------------------------------------------------
 
 sudo systemctl enable --now livesync.service
 sudo systemctl enable --now jojo-bot.service
-
-# Quartz is nice-to-have; failure shouldn't block.
-sudo systemctl enable --now quartz.service || \
-  echo "quartz failed to start, continuing"
 
 # --- smoke test: wait for bot to come online --------------------------------
 

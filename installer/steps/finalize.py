@@ -24,7 +24,10 @@ def run(state: dict) -> None:
         "ssh_key_path": state["ssh_key_path"],
         "disk_name": state.get("vm_name", "pawpad-vm") + "-data",
     }
-    RUNTIME_PATH.write_text(json.dumps(runtime, indent=2))
+    import os
+    fd = os.open(RUNTIME_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(runtime, f, indent=2)
 
     section(
         "done!",

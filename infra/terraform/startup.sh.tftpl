@@ -21,16 +21,20 @@ mkdir -p /var/lib/pawpad
 # --- create pawpad user ------------------------------------------------------
 
 if ! id -u ${pawpad_user} >/dev/null 2>&1; then
-  useradd --create-home --shell /bin/bash --groups sudo,docker ${pawpad_user}
+  # `docker` group doesn't exist yet — it's added later via `usermod -aG`.
+  useradd --create-home --shell /bin/bash --groups sudo ${pawpad_user}
   echo "${pawpad_user} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/pawpad
   chmod 440 /etc/sudoers.d/pawpad
 fi
 
 # --- mount workspace disk ----------------------------------------------------
 
-# Find the attached data disk. GCE exposes it as /dev/disk/by-id/google-pawpad-data.
+# Mount the data disk to /srv/pawpad-data, then symlink subdirs into the home.
+# This keeps the home filesystem's shell init files (.bashrc etc.) intact while
+# putting all bulky state on the dedicated disk.
 DATA_DISK=/dev/disk/by-id/google-pawpad-data
-MOUNT=/home/${pawpad_user}
+DATA_MOUNT=/srv/pawpad-data
+HOME_DIR=/home/${pawpad_user}
 
 if [[ -e "$DATA_DISK" ]]; then
   if ! blkid "$DATA_DISK" >/dev/null 2>&1; then
@@ -38,13 +42,20 @@ if [[ -e "$DATA_DISK" ]]; then
     mkfs.ext4 -F "$DATA_DISK"
   fi
   UUID=$(blkid -s UUID -o value "$DATA_DISK")
+  mkdir -p "$DATA_MOUNT"
   if ! grep -q "$UUID" /etc/fstab; then
-    echo "UUID=$UUID  $MOUNT  ext4  defaults,nofail  0 2" >> /etc/fstab
+    echo "UUID=$UUID  $DATA_MOUNT  ext4  defaults,nofail  0 2" >> /etc/fstab
   fi
-  mkdir -p "$MOUNT"
-  mount "$MOUNT" || true
-  chown -R ${pawpad_user}:${pawpad_user} "$MOUNT"
+  mount "$DATA_MOUNT" || true
+  sudo -u ${pawpad_user} mkdir -p "$DATA_MOUNT/projects" "$DATA_MOUNT/obsidian-vault" "$DATA_MOUNT/pawpad-state"
+  chown -R ${pawpad_user}:${pawpad_user} "$DATA_MOUNT"
 fi
+
+# Symlink subdirs into home so the bot's default paths (~/projects, ~/obsidian-vault) work.
+sudo -u ${pawpad_user} ln -sfn "$DATA_MOUNT/projects" "$HOME_DIR/projects"
+sudo -u ${pawpad_user} ln -sfn "$DATA_MOUNT/obsidian-vault" "$HOME_DIR/obsidian-vault"
+sudo -u ${pawpad_user} mkdir -p "$HOME_DIR/.pawpad"
+sudo -u ${pawpad_user} ln -sfn "$DATA_MOUNT/pawpad-state" "$HOME_DIR/.pawpad-data"
 
 # --- install system packages -------------------------------------------------
 
@@ -101,6 +112,17 @@ if ! tailscale status >/dev/null 2>&1; then
     --hostname="${tailscale_hostname}" \
     --advertise-tags=tag:pawpad \
     --ssh
+fi
+
+# Remove startup-script metadata so the tailscale authkey doesn't linger in
+# instance metadata (anyone with compute.instances.get can read metadata).
+# Requires the VM SA to have compute.instances.setMetadata (cloud-platform scope provides it).
+PROJECT=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/project/project-id)
+ZONE_FULL=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone)
+ZONE="$${ZONE_FULL##*/}"
+NAME=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name)
+if ! gcloud compute instances remove-metadata "$NAME" --project="$PROJECT" --zone="$ZONE" --keys=startup-script 2>/var/log/pawpad-cleanup.log; then
+  echo "could not remove startup-script metadata; tailscale authkey is still in metadata until you remove it manually"
 fi
 
 # --- claude code cli ---------------------------------------------------------

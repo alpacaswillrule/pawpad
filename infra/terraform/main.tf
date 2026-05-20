@@ -102,8 +102,8 @@ resource "google_compute_instance" "pawpad" {
   }
 
   metadata = {
-    ssh-keys       = "${var.ssh_user}:${var.ssh_pub_key}"
-    enable-oslogin = "FALSE"
+    ssh-keys                   = "${var.ssh_user}:${var.ssh_pub_key}"
+    enable-oslogin             = "FALSE"
     serial-port-logging-enable = "TRUE"
   }
 

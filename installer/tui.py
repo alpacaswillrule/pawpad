@@ -13,6 +13,7 @@ function. tui.py is a thin sequencer.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -43,7 +44,13 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
+    # Write through a temp file with 0600 perms before rename, so the secret-
+    # bearing file is never world-readable even momentarily.
+    tmp = STATE_FILE.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+    os.replace(tmp, STATE_FILE)
 
 
 STEPS = [

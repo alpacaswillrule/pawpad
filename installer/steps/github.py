@@ -44,7 +44,23 @@ def run(state: dict) -> None:
 
     state["ssh_key_path"] = str(key_path)
     state["ssh_pub_key"] = pub_path.read_text().strip()
+
+    # --- pull a gh token to ship to the VM so the bot can `gh repo create` ---
+    # gh CLI on the VM needs auth to create private repos per channel. Easiest
+    # path: copy the operator's existing token from `gh auth token`.
+    res = sh(["gh", "auth", "token"], check=False)
+    if res.returncode != 0 or not res.stdout.strip():
+        section(
+            "warning",
+            "Couldn't read your gh auth token via `gh auth token`. The bot won't be\n"
+            "able to create per-channel repos. You can SSH in after install and run\n"
+            "`gh auth login` manually.",
+        )
+    else:
+        state["gh_token"] = res.stdout.strip()
+
     section(
         "GitHub + SSH",
-        f"gh authed. Deploy keypair at [bold]{key_path}[/bold] (used for initial VM SSH only).",
+        f"gh authed. Deploy keypair at [bold]{key_path}[/bold] (used for initial VM SSH only).\n"
+        f"VM will reuse your gh token for per-channel `gh repo create`.",
     )

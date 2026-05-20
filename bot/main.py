@@ -168,15 +168,33 @@ class PawpadBot(discord.Client):
         await super().close()
 
 
+def _env(*names: str, default: str | None = None) -> str | None:
+    """Look up env var under multiple possible names; first non-empty wins."""
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return default
+
+
 def main() -> None:
-    load_dotenv()
+    # Load .env.dev first (local dev secrets) then .env on top with override=False.
+    # Empty values in .env shouldn't shadow real values in .env.dev.
+    load_dotenv(".env.dev")
+    load_dotenv(override=False)
+
     logging.basicConfig(
         level=os.environ.get("PAWPAD_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    token = os.environ["DISCORD_TOKEN"]
-    guild_id = int(os.environ["DISCORD_GUILD_ID"])
+    token = _env("DISCORD_TOKEN")
+    if not token:
+        raise SystemExit("DISCORD_TOKEN not set")
+    guild_id_raw = _env("DISCORD_GUILD_ID", "SERVER_ID", "DISCORD_SERVER_ID")
+    if not guild_id_raw:
+        raise SystemExit("DISCORD_GUILD_ID (or SERVER_ID) not set")
+    guild_id = int(guild_id_raw)
     workspaces_root = Path(os.environ.get("PAWPAD_WORKSPACES", "~/projects")).expanduser()
     vault_root = Path(os.environ.get("PAWPAD_VAULT", "~/obsidian-vault")).expanduser()
     gh_owner = os.environ.get("PAWPAD_GH_OWNER", "alpacaswillrule")

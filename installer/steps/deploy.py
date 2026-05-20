@@ -50,8 +50,10 @@ def _write_tfvars(state: dict) -> None:
         "ssh_pub_key": state["ssh_pub_key"],
     }
     path = TERRAFORM_DIR / "terraform.tfvars.json"
-    path.write_text(json.dumps(tfvars, indent=2))
-    os.chmod(path, 0o600)
+    # Open with 0600 from the start — no 0644 window for the authkey to leak.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(tfvars, f, indent=2)
 
 
 def _terraform_apply(state: dict) -> None:
@@ -120,6 +122,7 @@ def _run_install_vm(state: dict) -> None:
         "LIVESYNC_PASSPHRASE": state["livesync_passphrase"],
         "PAWPAD_GH_OWNER": state.get("github_user", "alpacaswillrule"),
         "PAWPAD_DEFAULT_DAILY_CAP_USD": str(state.get("default_daily_cap_usd", 500)),
+        "GH_TOKEN": state.get("gh_token", ""),
     })
 
     # SCP install-vm.sh over (the startup script clones the repo but the local

@@ -75,8 +75,11 @@ def load_env_dev_defaults(state: dict, repo_root: Path) -> None:
             mapping = {
                 "DISCORD_TOKEN": "discord_token",
                 "DISCORD_GUILD_ID": "discord_guild_id",
+                "SERVER_ID": "discord_guild_id",  # alt name
+                "DISCORD_SERVER_ID": "discord_guild_id",  # alt name
                 "ANTHROPIC_API_KEY": "anthropic_api_key",
                 "TAILSCALE_AUTHKEY": "tailscale_authkey",
+                "TAILSCALE_AUTH_KEY": "tailscale_authkey",  # alt name
                 "GCP_PROJECT_ID": "gcp_project_id",
                 "GCP_REGION": "gcp_region",
                 "GCP_ZONE": "gcp_zone",
