@@ -47,8 +47,9 @@ if [[ -e "$DATA_DISK" ]]; then
     echo "UUID=$UUID  $DATA_MOUNT  ext4  defaults,nofail  0 2" >> /etc/fstab
   fi
   mount "$DATA_MOUNT" || true
+  # chown the mount BEFORE creating subdirs as pawpad — fresh mounts are root-owned.
+  chown ${pawpad_user}:${pawpad_user} "$DATA_MOUNT"
   sudo -u ${pawpad_user} mkdir -p "$DATA_MOUNT/projects" "$DATA_MOUNT/obsidian-vault" "$DATA_MOUNT/pawpad-state"
-  chown -R ${pawpad_user}:${pawpad_user} "$DATA_MOUNT"
 fi
 
 # Symlink subdirs into home so the bot's default paths (~/projects, ~/obsidian-vault) work.
