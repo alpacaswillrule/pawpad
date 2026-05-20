@@ -1,0 +1,7 @@
+# Installer (runs on operator's machine)
+rich>=13.7
+textual>=0.58
+httpx>=0.27
+python-dotenv>=1.0
+pydantic>=2.7
+google-cloud-compute>=1.19

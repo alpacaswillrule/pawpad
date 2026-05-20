@@ -1,0 +1,22 @@
+[Unit]
+Description=pawpad Discord bot (Jojo)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pawpad
+WorkingDirectory=/opt/pawpad
+EnvironmentFile=/opt/pawpad/.env
+ExecStart=/opt/pawpad/.venv/bin/python -m bot.main
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jojo-bot
+
+# Resource limits — not blocking but worth setting
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

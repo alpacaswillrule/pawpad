@@ -1,0 +1,18 @@
+[Unit]
+Description=Quartz static-site server for the Obsidian wiki
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pawpad
+WorkingDirectory=/opt/pawpad/quartz
+ExecStart=/usr/bin/npx quartz serve --port 8080
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quartz
+
+[Install]
+WantedBy=multi-user.target

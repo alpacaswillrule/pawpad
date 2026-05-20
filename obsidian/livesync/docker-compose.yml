@@ -1,0 +1,24 @@
+# Self-Hosted LiveSync requires a CouchDB instance.
+# The Obsidian LiveSync plugin syncs to this DB over HTTPS.
+#
+# Tailscale-only: this listens on 0.0.0.0 inside the VM, but the VPC firewall
+# does not expose port 5984 publicly. Only tailnet peers can reach it.
+
+services:
+  couchdb:
+    image: couchdb:3
+    container_name: pawpad-couchdb
+    restart: unless-stopped
+    environment:
+      COUCHDB_USER: ${COUCHDB_USER}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
+    ports:
+      - "5984:5984"
+    volumes:
+      - couchdb-data:/opt/couchdb/data
+      - couchdb-config:/opt/couchdb/etc/local.d
+      - ./local.ini:/opt/couchdb/etc/local.d/local.ini:ro
+
+volumes:
+  couchdb-data:
+  couchdb-config:
