@@ -1,39 +1,55 @@
-"""Discord bot setup walkthrough.
-
-Walks the operator through creating a Discord application + bot user, then
-collects the bot token and guild ID. Verifies the bot can connect to Discord
-and reports its current guild memberships.
-
-Writes:
-  state["discord_token"]     (sensitive)
-  state["discord_guild_id"]
-"""
+"""Discord bot token + guild ID collection."""
 
 from __future__ import annotations
 
-# TODO:
-#   Step-by-step walkthrough:
-#     1. https://discord.com/developers/applications → "New Application" → name it "Jojo"
-#     2. Bot tab → Add Bot → copy token
-#     3. Privileged Gateway Intents: enable
-#          - SERVER MEMBERS INTENT
-#          - MESSAGE CONTENT INTENT
-#     4. OAuth2 → URL Generator:
-#          scopes:       bot, applications.commands
-#          permissions:  View Channels, Send Messages, Manage Channels, Read Message History,
-#                        Attach Files, Use Slash Commands, Embed Links, Add Reactions
-#     5. Open generated URL → invite bot to your guild
-#     6. In Discord, enable Developer Mode (User Settings → Advanced)
-#     7. Right-click your guild → Copy Server ID → paste here
-#
-#   Then verify via discord.py:
-#       import discord
-#       client = discord.Client(intents=discord.Intents.default())
-#       @client.event
-#       async def on_ready():
-#           ... check guild membership ...
-#       client.run(token)
+import httpx
+
+from installer._helpers import prompt, section
 
 
 def run(state: dict) -> None:
-    raise NotImplementedError("TODO: Discord bot setup")
+    have_token = bool(state.get("discord_token"))
+    have_guild = bool(state.get("discord_guild_id"))
+
+    if have_token and have_guild:
+        section(
+            "Discord",
+            "Token + guild ID loaded from .env.dev. Verifying...",
+        )
+    else:
+        section(
+            "Discord bot",
+            "1. https://discord.com/developers/applications → New Application → \"Jojo\"\n"
+            "2. Bot tab → Reset Token → copy\n"
+            "3. Enable [bold]MESSAGE CONTENT INTENT[/bold] (privileged gateway intents)\n"
+            "4. OAuth2 → URL Generator:\n"
+            "      scopes: bot, applications.commands\n"
+            "      perms: View Channels, Send Messages, Manage Channels,\n"
+            "             Read Message History, Attach Files, Use Slash Commands,\n"
+            "             Embed Links, Add Reactions\n"
+            "   Open the URL → invite the bot to your server\n"
+            "5. Discord Developer Mode → right-click your server → Copy Server ID\n"
+            "6. Create a category named [bold]`projects`[/bold] in your server\n",
+        )
+
+    token = state.get("discord_token") or prompt("Discord bot token", password=True)
+    guild_id = state.get("discord_guild_id") or prompt("Discord guild (server) ID")
+
+    headers = {"Authorization": f"Bot {token}"}
+    try:
+        with httpx.Client(timeout=10) as client:
+            r = client.get("https://discord.com/api/v10/users/@me", headers=headers)
+            r.raise_for_status()
+            bot_user = r.json()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Discord auth failed: {exc}") from exc
+
+    section(
+        "Discord: OK",
+        f"bot user: [bold]{bot_user.get('username')}#{bot_user.get('discriminator', '0')}[/bold] "
+        f"(id {bot_user.get('id')})",
+    )
+
+    state["discord_token"] = token
+    state["discord_guild_id"] = str(guild_id).strip()
+    state["discord_bot_user"] = bot_user.get("username")

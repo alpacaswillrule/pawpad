@@ -27,7 +27,7 @@ def confirm(label: str, *, default: bool = True) -> bool:
     return Confirm.ask(label, default=default, console=console)
 
 
-def run(cmd: list[str], *, check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
+def sh(cmd: list[str], *, check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
     """Run a shell command, capturing output."""
     return subprocess.run(
         cmd,
@@ -38,7 +38,7 @@ def run(cmd: list[str], *, check: bool = True, env: dict | None = None) -> subpr
     )
 
 
-def run_stream(cmd: list[str], *, env: dict | None = None) -> int:
+def sh_stream(cmd: list[str], *, env: dict | None = None) -> int:
     """Run a shell command, streaming output live to the console."""
     console.print(f"[dim]$ {' '.join(shlex.quote(c) for c in cmd)}[/dim]")
     return subprocess.call(cmd, env={**os.environ, **(env or {})})

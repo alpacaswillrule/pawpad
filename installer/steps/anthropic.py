@@ -1,22 +1,28 @@
-"""Anthropic API key collection + validation.
-
-Operator pastes their API key from https://console.anthropic.com/settings/keys.
-We make a cheap models-list call to verify the key works.
-
-Writes:
-  state["anthropic_api_key"]  (sensitive)
-"""
+"""Anthropic API key validation."""
 
 from __future__ import annotations
 
-# TODO:
-#   - link to https://console.anthropic.com/settings/keys
-#   - prompt for paste (hide input)
-#   - validate via httpx GET https://api.anthropic.com/v1/models
-#     headers: x-api-key, anthropic-version
-#   - optional: ask operator to set a workspace spend cap in console (we'll
-#     enforce daily caps in-bot too, but a hard ceiling at the console is safer)
+import httpx
+
+from installer._helpers import prompt, section
 
 
 def run(state: dict) -> None:
-    raise NotImplementedError("TODO: Anthropic API key validation")
+    key = state.get("anthropic_api_key") or prompt(
+        "Anthropic API key (sk-ant-...)", password=True
+    )
+    if not key.startswith("sk-ant-"):
+        raise RuntimeError("API key should start with 'sk-ant-'")
+
+    try:
+        with httpx.Client(timeout=10) as client:
+            r = client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+            )
+            r.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Anthropic key validation failed: {exc}") from exc
+
+    state["anthropic_api_key"] = key
+    section("Anthropic: OK", "key validated against /v1/models")

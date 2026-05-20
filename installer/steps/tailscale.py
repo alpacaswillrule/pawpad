@@ -1,27 +1,24 @@
-"""Tailscale auth key collection.
-
-Operator generates a reusable auth key at
-https://login.tailscale.com/admin/settings/keys, pastes it here.
-
-Optionally we can verify the key by hitting Tailscale's API.
-
-Writes:
-  state["tailscale_authkey"]   (sensitive — never written to logs)
-  state["tailscale_tags"]      list of tags to apply to the VM, default ["tag:pawpad"]
-"""
+"""Tailscale auth key collection."""
 
 from __future__ import annotations
 
-# TODO:
-#   - present link with copyable instructions:
-#       1. https://login.tailscale.com/admin/settings/keys
-#       2. Generate auth key, check "Reusable" and "Ephemeral" (or one-time
-#          if operator prefers strict)
-#       3. paste here
-#   - validate format (tskey-auth-...)
-#   - optional: hit https://api.tailscale.com/api/v2/whois to validate
-#   - optional: warn operator to add `tag:pawpad` to their tailnet ACL
+from installer._helpers import prompt, section
 
 
 def run(state: dict) -> None:
-    raise NotImplementedError("TODO: Tailscale auth key collection")
+    if state.get("tailscale_authkey", "").startswith("tskey-auth-"):
+        section("Tailscale", "Auth key already loaded from .env.dev. Skipping.")
+        return
+
+    section(
+        "Tailscale auth key",
+        "1. Open: [link]https://login.tailscale.com/admin/settings/keys[/link]\n"
+        "2. Add tag `tag:pawpad` to your ACL at\n"
+        "   [link]https://login.tailscale.com/admin/acls/file[/link] (under tagOwners)\n"
+        "3. Generate auth key: check Reusable, Pre-approved, tag: tag:pawpad\n"
+        "4. Copy the [bold]tskey-auth-...[/bold] string and paste below.\n",
+    )
+    key = prompt("Tailscale auth key (tskey-auth-...)", password=True)
+    if not key.startswith("tskey-"):
+        raise RuntimeError("auth key should start with 'tskey-'")
+    state["tailscale_authkey"] = key

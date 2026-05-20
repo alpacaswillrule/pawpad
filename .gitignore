@@ -36,8 +36,9 @@ Thumbs.db
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfvars.json
 !*.tfvars.example
-.terraform.lock.hcl
+# .terraform.lock.hcl is intentionally NOT ignored (commit for reproducibility)
 
 # Installer scratch
 installer/.cache/

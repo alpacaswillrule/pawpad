@@ -1,24 +1,50 @@
-"""GitHub auth verification.
-
-Verifies that `gh` CLI is authed on this machine, that the active account
-matches the expected owner (alpacaswillrule by default), and that the active
-auth has `repo` scope so the bot can create private repos.
-
-The VM will get a separate SSH deploy key generated during the deploy step.
-
-Writes:
-  state["github_user"]
-"""
+"""GitHub auth verification + deploy keypair generation."""
 
 from __future__ import annotations
 
-# TODO:
-#   - run `gh auth status --hostname github.com` and parse
-#   - confirm the active account
-#   - check `repo` scope
-#   - if not authed: instruct operator to run `gh auth login -s repo,admin:public_key`
-#   - then re-run installer (state is persisted, will resume)
+import os
+from pathlib import Path
+
+from installer._helpers import have_cmd, section, sh
 
 
 def run(state: dict) -> None:
-    raise NotImplementedError("TODO: GitHub auth verification")
+    if not have_cmd("gh"):
+        raise RuntimeError(
+            "gh CLI not installed. Install via `brew install gh` and re-run."
+        )
+
+    res = sh(["gh", "auth", "status"], check=False)
+    if res.returncode != 0:
+        raise RuntimeError(
+            "gh is not authenticated. Run:\n"
+            "  gh auth login -s repo,admin:public_key\n"
+            "and re-run the installer."
+        )
+
+    out = (res.stdout or "") + (res.stderr or "")
+    if "alpacaswillrule" not in out:
+        section(
+            "warning",
+            f"gh appears authed but not as `alpacaswillrule`:\n{out[:400]}\n\n"
+            "Continuing anyway — change PAWPAD_GH_OWNER if needed.",
+        )
+
+    state["github_user"] = "alpacaswillrule"
+
+    # --- generate deploy keypair for the VM's initial SSH login --------------
+    key_path = Path("~/.pawpad/vm_ssh_key").expanduser()
+    pub_path = Path(str(key_path) + ".pub")
+    if not key_path.exists():
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        sh(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key_path), "-C", "pawpad-vm-deploy"],
+        )
+        os.chmod(key_path, 0o600)
+
+    state["ssh_key_path"] = str(key_path)
+    state["ssh_pub_key"] = pub_path.read_text().strip()
+    section(
+        "GitHub + SSH",
+        f"gh authed. Deploy keypair at [bold]{key_path}[/bold] (used for initial VM SSH only).",
+    )
