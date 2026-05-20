@@ -121,6 +121,13 @@ resource "google_compute_instance" "pawpad" {
 
   allow_stopping_for_update = true
 
+  # Startup-script edits should not trigger a full VM destroy/recreate —
+  # the script only runs at first boot anyway. To force a recreate explicitly,
+  # `terraform taint google_compute_instance.pawpad` or pass -replace.
+  lifecycle {
+    ignore_changes = [metadata_startup_script, metadata["startup-script"]]
+  }
+
   depends_on = [google_project_service.compute]
 }
 
