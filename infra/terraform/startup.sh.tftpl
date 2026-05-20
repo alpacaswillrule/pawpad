@@ -140,7 +140,9 @@ fi
 # --- clone pawpad repo to /opt/pawpad ----------------------------------------
 
 if [[ ! -d /opt/pawpad/.git ]]; then
-  mkdir -p /opt
+  # Pre-create /opt/pawpad owned by pawpad so the clone-as-pawpad can populate it.
+  mkdir -p /opt/pawpad
+  chown ${pawpad_user}:${pawpad_user} /opt/pawpad
   sudo -u ${pawpad_user} git clone --depth 1 --branch "${repo_ref}" "${repo_url}" /opt/pawpad
 fi
 

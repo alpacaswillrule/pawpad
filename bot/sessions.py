@@ -304,6 +304,16 @@ class SessionManager:
                     await self.audit.post_crash(session.channel_name, exc)
                     # Drop the dead client so the next turn rebuilds it
                     await self._force_disconnect(session)
+                    # Drop the pending messages that just crashed — otherwise
+                    # the next iteration retries them and loops forever on the
+                    # same fatal error. The user can re-send if they want.
+                    if session.pending:
+                        logger.warning(
+                            "discarding %d pending msgs after crash in #%s",
+                            len(session.pending), session.channel_name,
+                        )
+                        session.pending.clear()
+                    return  # exit the drain loop; next message starts fresh
         finally:
             session.drainer = None
             # If we exited because pause was flipped mid-turn, release the slot now.
@@ -477,12 +487,23 @@ class SessionManager:
         if session.client is not None:
             return
 
+        # SDK requires an iterable for allowed_tools — `None` crashes inside
+        # _apply_skills_defaults. Pass an explicit list of all known built-ins +
+        # the custom MCP tool. (Permission_mode=bypassPermissions means none of
+        # these prompt; the list is just gating membership.)
+        allowed_tools = [
+            "Read", "Write", "Edit", "MultiEdit", "Bash",
+            "Glob", "Grep", "WebSearch", "WebFetch",
+            "Task", "TodoWrite", "NotebookEdit",
+            "mcp__pawpad__discord_send",
+        ]
+
         options = ClaudeAgentOptions(
             cwd=str(session.workspace),
             permission_mode="bypassPermissions",
             system_prompt=self._build_system_prompt(session),
             mcp_servers={"pawpad": make_server(self.bot.get_channel(session.channel_id))},
-            allowed_tools=None,  # SDK default = all
+            allowed_tools=allowed_tools,
             setting_sources=["project"],
             resume=session.session_id,
         )

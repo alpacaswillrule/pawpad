@@ -99,15 +99,28 @@ class PawpadBot(discord.Client):
         self.budget.open()
         register_slash_commands(self.tree, self)
 
+        # Globally-registered tree commands get copied to the guild via
+        # copy_global_to so they appear instantly (no 1hr global propagation).
+        guild_obj = discord.Object(id=self.guild_id)
+        try:
+            self.tree.copy_global_to(guild=guild_obj)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("copy_global_to skipped: %s", exc)
+
         sig = _slash_signature(self.tree)
         prev = SLASH_HASH_PATH.read_text().strip() if SLASH_HASH_PATH.exists() else ""
         force = os.environ.get("PAWPAD_FORCE_SYNC") == "1"
         if force or sig != prev:
             try:
-                await self.tree.sync(guild=discord.Object(id=self.guild_id))
+                synced = await self.tree.sync(guild=guild_obj)
                 SLASH_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
                 SLASH_HASH_PATH.write_text(sig)
-                logger.info("slash commands synced to guild %s", self.guild_id)
+                logger.info(
+                    "synced %d slash commands to guild %s: %s",
+                    len(synced),
+                    self.guild_id,
+                    ", ".join(f"/{c.name}" for c in synced) or "(none!)",
+                )
             except discord.HTTPException as exc:
                 logger.warning("slash sync failed: %s", exc)
         else:
