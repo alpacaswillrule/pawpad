@@ -157,6 +157,30 @@ class PawpadBot(discord.Client):
         except Exception:
             logger.exception("on_guild_channel_delete failed")
 
+    async def on_thread_create(self, thread: discord.Thread) -> None:
+        try:
+            await self.sessions.on_thread_created(thread)
+        except Exception:
+            logger.exception("on_thread_create failed")
+
+    async def on_thread_delete(self, thread: discord.Thread) -> None:
+        try:
+            await self.sessions.on_thread_deleted(thread)
+        except Exception:
+            logger.exception("on_thread_delete failed")
+
+    async def on_thread_update(
+        self, before: discord.Thread, after: discord.Thread
+    ) -> None:
+        try:
+            if before.archived != after.archived:
+                if after.archived:
+                    await self.sessions.on_thread_archived(after)
+                else:
+                    await self.sessions.on_thread_unarchived(after)
+        except Exception:
+            logger.exception("on_thread_update failed")
+
     async def on_message(self, msg: discord.Message) -> None:
         if msg.guild is None or msg.guild.id != self.guild_id:
             return

@@ -45,7 +45,7 @@ from claude_agent_sdk import (
 
 from bot.budget import Budget, TurnCost
 from bot.mcp.discord_send import make_server
-from bot.output import TypingHeartbeat, TurnFooter, post_chunked, post_turn
+from bot.output import LiveMessage, TypingHeartbeat, TurnFooter, post_chunked
 
 if TYPE_CHECKING:
     from bot.audit import Audit
@@ -55,6 +55,10 @@ logger = logging.getLogger("pawpad.sessions")
 
 IDLE_TIMEOUT_SECONDS = 30 * 60
 IDLE_SCAN_INTERVAL_SECONDS = 60
+# If the SDK is mid-turn and emits nothing new for this long, treat the turn
+# as finished and flush. Prevents indefinite stalls when ResultMessage never
+# arrives (which we've observed in stream-json mode in some setups).
+TURN_IDLE_TIMEOUT_SECONDS = 60
 SESSION_STORE = Path("~/.pawpad/sessions.json").expanduser()
 
 REPO_OWNER_ENV = "PAWPAD_GH_OWNER"
@@ -75,11 +79,23 @@ def slugify(name: str) -> str:
 
 @dataclass
 class ChannelSession:
-    channel_id: int
-    channel_name: str
+    """One agent session — either a channel-level session or a thread-level one.
+
+    Thread sessions are spawned by `on_thread_create` and work inside a git
+    worktree off the parent channel's repo. Each thread runs on its own
+    branch so multiple agents can work on the same repo without conflict.
+    """
+
+    channel_id: int  # Discord ID — uniquely identifies channel OR thread
+    channel_name: str  # display name (e.g. "tachi-extension" or "tachi-extension/debug-empty-page")
     workspace: Path
     vault_project_dir: Path
     repo_url: str | None = None
+
+    # Thread metadata (None for channel sessions)
+    is_thread: bool = False
+    parent_channel_id: int | None = None
+    branch: str | None = None  # for threads: the worktree's branch (e.g. "thread/foo")
 
     # SDK state
     session_id: str | None = None
@@ -209,6 +225,54 @@ class SessionManager:
 
         logger.info("bootstrapped %d channels under #%s", len(self.sessions), category.name)
 
+        # Walk threads inside each project channel and reattach sessions
+        # for any whose worktree still exists.
+        thread_count = 0
+        for channel in category.text_channels:
+            try:
+                # Both active threads (cached) and archived public threads.
+                threads: list[discord.Thread] = list(channel.threads)
+                async for archived in channel.archived_threads(limit=50):
+                    threads.append(archived)
+            except discord.HTTPException as exc:
+                logger.warning("could not list threads of #%s: %s", channel.name, exc)
+                continue
+            for thread in threads:
+                if thread.id in self.sessions:
+                    continue
+                channel_slug = slugify(channel.name)
+                thread_slug = slugify(thread.name)
+                worktree = self.workspaces_root / f"{channel_slug}-threads" / thread_slug
+                vault_dir = (
+                    self.vault_root / "projects" / channel_slug / "threads" / thread_slug
+                )
+                branch = f"thread/{thread_slug}"
+                stored_sid = stored.get(str(thread.id))
+                session = ChannelSession(
+                    channel_id=thread.id,
+                    channel_name=f"{channel.name}/{thread.name}",
+                    workspace=worktree,
+                    vault_project_dir=vault_dir,
+                    repo_url=f"https://github.com/{self.gh_owner}/{channel_slug}",
+                    is_thread=True,
+                    parent_channel_id=channel.id,
+                    branch=branch,
+                    session_id=stored_sid,
+                )
+                self.sessions[thread.id] = session
+                thread_count += 1
+                if not worktree.exists():
+                    try:
+                        await self._scaffold_thread_worktree(
+                            parent_slug=channel_slug,
+                            thread_id=thread.id,
+                            thread_slug=thread_slug,
+                        )
+                    except Exception:
+                        logger.exception("re-scaffold thread worktree failed")
+        if thread_count:
+            logger.info("bootstrapped %d thread sessions", thread_count)
+
     # ---- channel events ----------------------------------------------------
 
     async def on_channel_created(self, channel: discord.abc.GuildChannel) -> None:
@@ -253,6 +317,100 @@ class SessionManager:
         if channel.id not in self.sessions:
             return
         await self.archive_channel(channel.id, source="delete")
+
+    # ---- thread events -----------------------------------------------------
+
+    async def on_thread_created(self, thread: discord.Thread) -> None:
+        """A new thread was created. If its parent channel has a project
+        session, spin up a parallel agent in a git worktree on its own branch."""
+        parent = thread.parent
+        if not isinstance(parent, discord.TextChannel):
+            return
+        if not _under_projects_category(parent, self.PROJECTS_CATEGORY):
+            return
+        if thread.id in self.sessions:
+            return
+
+        parent_session = self.sessions.get(parent.id)
+        if parent_session is None:
+            logger.warning(
+                "thread #%s parent channel #%s has no session yet — skipping",
+                thread.name,
+                parent.name,
+            )
+            return
+
+        channel_slug = slugify(parent.name)
+        thread_slug = slugify(thread.name)
+        worktree = self.workspaces_root / f"{channel_slug}-threads" / thread_slug
+        vault_dir = (
+            self.vault_root / "projects" / channel_slug / "threads" / thread_slug
+        )
+        branch = f"thread/{thread_slug}"
+
+        session = ChannelSession(
+            channel_id=thread.id,
+            channel_name=f"{parent.name}/{thread.name}",
+            workspace=worktree,
+            vault_project_dir=vault_dir,
+            repo_url=parent_session.repo_url,
+            is_thread=True,
+            parent_channel_id=parent.id,
+            branch=branch,
+        )
+        self.sessions[thread.id] = session
+
+        try:
+            await self._scaffold_thread_worktree(
+                parent_slug=channel_slug,
+                thread_id=thread.id,
+                thread_slug=thread_slug,
+            )
+        except Exception as exc:
+            logger.exception("worktree scaffold failed for thread #%s", thread.name)
+            await self.audit.post_crash(session.channel_name, exc)
+            self.sessions.pop(thread.id, None)
+            return
+
+        try:
+            await thread.send(
+                f"thread session ready · worktree `{worktree}` on branch `{branch}` · "
+                f"work here in parallel with the channel agent and other threads"
+            )
+        except discord.HTTPException as exc:
+            logger.warning("could not post welcome in thread #%s: %s", thread.name, exc)
+
+        await self.audit.post_event(
+            "channel",
+            f"thread **{parent.name}/{thread.name}** opened on branch `{branch}`",
+        )
+
+        # If the thread's starter message has content, treat it as the initial prompt.
+        try:
+            starter = await thread.fetch_message(thread.id)
+        except discord.HTTPException:
+            starter = None
+        if starter and starter.content.strip():
+            session.pending.append(
+                f"<{starter.author.display_name}>: {starter.content.strip()}"
+            )
+            session.last_user_msg_at = time.time()
+            self._kick(session)
+
+    async def on_thread_deleted(self, thread: discord.Thread) -> None:
+        if thread.id not in self.sessions:
+            return
+        await self._archive_thread(thread.id)
+
+    async def on_thread_archived(self, thread: discord.Thread) -> None:
+        """Thread archived (Discord side) — pause the session but keep state."""
+        if thread.id not in self.sessions:
+            return
+        await self.pause(thread.id)
+
+    async def on_thread_unarchived(self, thread: discord.Thread) -> None:
+        """Thread unarchived — resume the session."""
+        await self.resume(thread.id)
 
     # ---- message routing ---------------------------------------------------
 
@@ -410,19 +568,41 @@ class SessionManager:
             model: str = "claude-opus-4-7"
             t0 = time.monotonic()
 
+            live = LiveMessage(channel)
             got_result = False
             try:
                 async with TypingHeartbeat(channel):
                     await session.client.query(prompt)
-                    async for message in session.client.receive_response():
+                    # Wrap the SDK's async iterator with an inactivity timeout
+                    # so a stuck/never-ending turn eventually finalizes.
+                    stream = session.client.receive_response()
+                    while True:
+                        try:
+                            message = await asyncio.wait_for(
+                                stream.__anext__(), timeout=TURN_IDLE_TIMEOUT_SECONDS
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "no SDK activity for %ds in #%s — finalizing turn",
+                                TURN_IDLE_TIMEOUT_SECONDS,
+                                session.channel_name,
+                            )
+                            break
+
                         if isinstance(message, AssistantMessage):
                             for block in message.content:
                                 if isinstance(block, ToolUseBlock):
                                     footer.tool_count += 1
                                     session.mark_tool()
                                 elif isinstance(block, TextBlock):
-                                    text_parts.append(block.text)
                                     session.mark_token()
+                                    text_parts.append(block.text)
+                                    # Stream text live so the user sees the
+                                    # response as it arrives — no waiting for
+                                    # ResultMessage.
+                                    await live.append(block.text)
                         elif isinstance(message, ResultMessage):
                             got_result = True
                             if message.session_id:
@@ -432,14 +612,21 @@ class SessionManager:
                                 )
                             usage = getattr(message, "usage", None) or {}
                             model = getattr(message, "model", model) or model
+                            # If we never streamed any text but the SDK gave
+                            # us a final `result`, post that now.
                             if not text_parts and getattr(message, "result", None):
-                                text_parts.append(message.result)
+                                await live.append(message.result)
                             break
             except Exception:
                 # Failure during the turn — restore pending so the user's messages
                 # aren't silently dropped. Outer except in _drain handles the post.
                 for line in reversed(drained):
                     session.pending.appendleft(line)
+                # Also try to flush whatever we streamed before the crash.
+                try:
+                    await live.finalize(footer="(turn errored — see #jojo-audit)")
+                except Exception:  # noqa: BLE001
+                    pass
                 raise
 
             footer.elapsed_seconds = time.monotonic() - t0
@@ -477,11 +664,14 @@ class SessionManager:
                 if threshold == 1.0:
                     await self._pause_all_for_budget()
 
-            text = "".join(text_parts).strip()
-            if text:
-                await post_turn(channel, text, footer=footer)
-            else:
-                await channel.send(footer.render())
+            # Live message holds whatever we streamed. Finalize with the
+            # footer appended (or as a standalone message if it doesn't fit).
+            await live.finalize(footer=footer.render())
+            if not text_parts and not got_result:
+                # No text streamed AND no ResultMessage — most likely the agent
+                # only used discord_send and timed out. The footer is already
+                # in the live finalize path, so nothing else to do here.
+                pass
 
     async def _ensure_client(self, session: ChannelSession) -> None:
         if session.client is not None:
@@ -515,14 +705,32 @@ class SessionManager:
             await self.audit.post_resume(session.channel_name)
 
     def _build_system_prompt(self, session: ChannelSession) -> str:
+        thread_note = ""
+        if session.is_thread:
+            thread_note = (
+                f" You are in a Discord thread (id {session.channel_id}) off "
+                f"parent channel id {session.parent_channel_id}, working in a "
+                f"git worktree on its own branch — multiple agents may be "
+                f"working on this repo in parallel; commit and push to your "
+                f"branch and open a PR rather than touching `main`."
+            )
         return (
             f"You are running as Jojo in Discord channel #{session.channel_name}. "
             f"Workspace: {session.workspace}. "
             f"Obsidian vault: {self.vault_root} "
             f"(this channel's notes live at {session.vault_project_dir}). "
             f"The user 'jojo' may not be the only person in the channel. "
-            f"The bot will auto-post your final reply each turn — call the "
-            f"`mcp__pawpad__discord_send` tool only for mid-turn status updates. "
+            f"\n\n"
+            f"Reply by writing assistant text — it streams to Discord live "
+            f"as you generate, so the user sees your reasoning and answer "
+            f"in real time. Talk to the user, answer their questions, "
+            f"explain what you're doing. Don't be terse. "
+            f"\n\n"
+            f"The `mcp__pawpad__discord_send` tool exists for discrete "
+            f"status pings that you want visually separated from your main "
+            f"reply (e.g. 'starting the test suite…'). It does NOT replace "
+            f"normal assistant text. Don't use it for ordinary answers.{thread_note}"
+            f"\n\n"
             f"Follow the VM-wide CLAUDE.md and this workspace's CLAUDE.md."
         )
 
@@ -636,6 +844,85 @@ class SessionManager:
             pass
 
     # ---- scaffolding -------------------------------------------------------
+
+    async def _scaffold_thread_worktree(
+        self,
+        *,
+        parent_slug: str,
+        thread_id: int,
+        thread_slug: str,
+    ) -> None:
+        """Run scripts/new-thread.sh to create a git worktree + vault folder."""
+        env = {
+            "HOME": str(Path.home()),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "WORKSPACES_ROOT": str(self.workspaces_root),
+            "VAULT_ROOT": str(self.vault_root),
+        }
+        script = self.scripts_root / "new-thread.sh"
+        proc = await asyncio.create_subprocess_exec(
+            str(script),
+            parent_slug,
+            str(thread_id),
+            thread_slug,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise RuntimeError("new-thread.sh timed out") from None
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"new-thread.sh failed (rc={proc.returncode}): {err.decode()[:400]}"
+            )
+
+    async def _archive_thread(self, thread_id: int) -> None:
+        """Remove a thread's worktree + vault dir."""
+        session = self.sessions.get(thread_id)
+        if session is None:
+            return
+        # close client + free slot first
+        await self.pause(thread_id)
+        self.sessions.pop(thread_id, None)
+
+        if not session.is_thread or session.parent_channel_id is None:
+            return
+
+        # find parent slug
+        parent_ch = self.bot.get_channel(session.parent_channel_id)
+        parent_slug = slugify(parent_ch.name) if parent_ch else "unknown"
+        thread_slug = slugify(session.channel_name.split("/", 1)[-1])
+
+        env = {
+            "HOME": str(Path.home()),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "WORKSPACES_ROOT": str(self.workspaces_root),
+            "VAULT_ROOT": str(self.vault_root),
+        }
+        script = self.scripts_root / "archive-thread.sh"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(script), parent_slug, thread_slug,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+                if proc.returncode != 0:
+                    logger.error("archive-thread.sh failed: %s", err.decode()[:400])
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                logger.error("archive-thread.sh timed out")
+        except Exception:
+            logger.exception("archive-thread crashed")
+        await self._forget_session_id(thread_id)
+        await self.audit.post_archived(session.channel_name, "_archived/threads/")
 
     async def _scaffold_workspace(
         self, channel: discord.abc.GuildChannel, session: ChannelSession

@@ -52,11 +52,32 @@ Bot only watches channels under a Discord category named **`projects`**. Channel
 
 2. **User messages** → routed to the channel's SDK session and **queued for the agent's next turn boundary**. Mid-turn messages are NOT injected immediately; they appear in the next turn's input. No interrupt. (This mirrors how additional messages work in interactive Claude Code.)
 
-3. **Agent output** → only the final natural-language text of each turn is streamed to Discord, with a typing indicator while the agent works. Each turn ends with a collapsed footer like `• 14 tools · 47s · $0.23`. Long outputs are chunked at the 2000-char Discord limit; code blocks larger than 1800 chars are attached as files instead of inlined.
+3. **Agent output** → assistant text is **streamed to Discord live** as the SDK emits `TextBlock`s. The first `TextBlock` of a turn posts a new Discord message; subsequent blocks edit it in place (rate-limited to ~1 edit/sec). When the message hits ~1900 chars it spills to a new message on a clean boundary. The turn ends with a `ResultMessage` (or a 60-second inactivity timeout) and the footer is appended: `• 14 tools · 47s · $0.23`. Code blocks larger than 1800 chars are attached as files instead of inlined.
 
 4. **Idle 30min** (per above definition) → suspend session. Concurrency slot freed for queued channels.
 
 5. **Channel deleted** → workspace + Obsidian project folder moved to `~/projects/_archived/{slug}-{timestamp}/`. The GitHub repo is untouched. Audit-log entry posted.
+
+### Threads → parallel agents
+
+Each new Discord thread under a watched channel spawns its own Claude Agent
+SDK session in a **git worktree** off the parent channel's repo, on a new
+branch `thread/<slug>` — so multiple agents can work on the same project in
+parallel without stepping on each other.
+
+```
+~/projects/tachi-extension/                    ← channel session (main branch)
+~/projects/tachi-extension-threads/
+    ├── debug-empty-page/                      ← thread 1 worktree (branch thread/debug-empty-page)
+    └── pr-37-rebase/                          ← thread 2 worktree (branch thread/pr-37-rebase)
+```
+
+- **`on_thread_create`** → `scripts/new-thread.sh {channel-slug} {thread-id} {thread-slug}` creates the worktree + a `thread/<slug>` branch, scaffolds `obsidian-vault/projects/{channel}/threads/{thread}/plan.md`, and (if the thread's starter message has content) enqueues it as the agent's initial prompt.
+- **Sessions are keyed by Discord ID** — channel IDs and thread IDs are globally unique, so the `SessionManager.sessions` dict holds both types.
+- **The 8-slot concurrency cap counts all sessions** — channel and thread sessions compete for the same budget. Idle sessions suspend after 30 min.
+- **`on_thread_archive`** (Discord-side archive) → pauses the session, releases the slot. **`on_thread_unarchive`** → resumes.
+- **`on_thread_delete`** → `scripts/archive-thread.sh` removes the worktree (`git worktree remove --force`), moves any leftover files to `~/projects/_archived/threads/`. The thread's branch is **not** deleted — committed work is preserved for later inspection / PR.
+- **Agents in threads are instructed to push to their branch and open a PR rather than touching `main`** (via per-thread `CLAUDE.md` written by `new-thread.sh`).
 
 ### Authorization
 

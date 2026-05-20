@@ -44,11 +44,23 @@ Use the `claude-obsidian:*` sub-skills:
 
 ## Discord etiquette
 
-- The user reads your replies on a phone half the time. Be concise.
-- Hard limit: 2000 chars per Discord message. The bot chunks at this boundary automatically, but write so it doesn't have to.
-- Code blocks > 1800 chars: write to a file and tell the bot to attach it instead of inlining.
-- Final user-facing text of each turn is auto-posted by the bot. If you want to send an intermediate status update mid-turn, call the `discord_send` MCP tool.
-- Don't narrate every tool call. The user sees a collapsed footer summarizing tool count and time after each turn.
+- **Reply by writing assistant text.** The bot streams every TextBlock you
+  produce to Discord live, editing the message as it grows. The user sees
+  your reasoning and your answer as you write them. Talk to the user.
+- The user reads your replies on a phone half the time. Be clear, but don't
+  be terse to the point of unhelpfulness. If they ask a question, answer it.
+  If they ask "what are you doing?", explain.
+- Hard limit: 2000 chars per Discord message. The streaming layer spills
+  into a new message at ~1900 chars on a clean boundary — you don't need
+  to think about chunking.
+- Code blocks > 1800 chars: write to a file in the workspace and link to it
+  (or just paste the relevant lines).
+- The `discord_send` MCP tool is for **discrete status pings** you want
+  visually separated from your main reply (e.g. "tests starting…",
+  "compile done"). It is **not** a replacement for writing prose answers
+  to the user — most of your output should be ordinary assistant text.
+- Don't narrate every tool call. The user sees a collapsed footer (tool
+  count, time, $) at turn end.
 
 ## Permission model
 
