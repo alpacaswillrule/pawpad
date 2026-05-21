@@ -57,7 +57,8 @@ for v in PROJECT ZONE HOT_SIZE COLD_SIZE SSH_KEY; do
   fi
 done
 
-TS=$(date -u +%Y%m%dT%H%M%SZ)
+# GCP resource names must be all lowercase + hyphens.
+TS=$(date -u +%Y%m%d-%H%M%S)
 SNAP_NAME="${INSTANCE}-pre-retrofit-${TS}"
 OLD_DATA_DISK="${INSTANCE}-data"
 NEW_DATA_DISK="${INSTANCE}-data-v2"
@@ -84,11 +85,13 @@ ssh_vm() {
 # ---- 1. stop the bot, tar the data ----------------------------------------
 
 echo "==> Stopping bot + tar'ing data..."
+# /tmp gets cleared on reboot on Ubuntu 24.04, so we tar to /root which
+# survives. The post-swap restore reads from /root/pawpad-data-backup.tar.gz.
 ssh_vm '
   set -e
   sudo systemctl stop jojo-bot.service 2>/dev/null || true
-  sudo tar -czf /tmp/pawpad-data-backup.tar.gz -C / srv/pawpad-data
-  ls -la /tmp/pawpad-data-backup.tar.gz
+  sudo tar -czf /root/pawpad-data-backup.tar.gz -C / srv/pawpad-data
+  sudo ls -la /root/pawpad-data-backup.tar.gz
 '
 
 # ---- 2. snapshot the old data disk (belt+suspenders) ----------------------
@@ -98,13 +101,7 @@ gcloud compute disks snapshot "${OLD_DATA_DISK}" \
     --project="${PROJECT}" --zone="${ZONE}" \
     --snapshot-names="${SNAP_NAME}"
 
-# ---- 3. create the new disks (while the VM still runs) --------------------
-
-echo "==> Creating ${NEW_DATA_DISK} (${HOT_SIZE}GB pd-balanced)..."
-gcloud compute disks create "${NEW_DATA_DISK}" \
-    --project="${PROJECT}" --zone="${ZONE}" \
-    --size="${HOT_SIZE}GB" --type=pd-balanced \
-    --labels=pawpad=true,tier=hot
+# ---- 3. create the cold disk (different quota — pd-standard) --------------
 
 echo "==> Creating ${COLD_DISK} (${COLD_SIZE}GB pd-standard)..."
 gcloud compute disks create "${COLD_DISK}" \
@@ -112,7 +109,10 @@ gcloud compute disks create "${COLD_DISK}" \
     --size="${COLD_SIZE}GB" --type=pd-standard \
     --labels=pawpad=true,tier=cold
 
-# ---- 4. stop VM, swap disks -----------------------------------------------
+# ---- 4. stop VM, detach old, then DELETE it before creating the new SSD ----
+# Why delete first: the SSD quota (default 500GB) doesn't allow the old
+# disk + the new one to coexist in the same region. The snapshot from step 2
+# is the rollback if anything goes wrong here.
 
 echo "==> Stopping VM..."
 gcloud compute instances stop "${INSTANCE}" --project="${PROJECT}" --zone="${ZONE}"
@@ -120,6 +120,19 @@ gcloud compute instances stop "${INSTANCE}" --project="${PROJECT}" --zone="${ZON
 echo "==> Detaching old data disk..."
 gcloud compute instances detach-disk "${INSTANCE}" \
     --project="${PROJECT}" --zone="${ZONE}" --disk="${OLD_DATA_DISK}"
+
+echo "==> Deleting old data disk (snapshot ${SNAP_NAME} is the backup)..."
+gcloud compute disks delete "${OLD_DATA_DISK}" \
+    --project="${PROJECT}" --zone="${ZONE}" --quiet
+
+echo "==> Creating ${NEW_DATA_DISK} (${HOT_SIZE}GB pd-balanced)..."
+# We name the new disk with the ORIGINAL disk name so terraform state stays
+# clean. ${NEW_DATA_DISK} earlier was a placeholder — overwrite it to match.
+NEW_DATA_DISK="${OLD_DATA_DISK}"
+gcloud compute disks create "${NEW_DATA_DISK}" \
+    --project="${PROJECT}" --zone="${ZONE}" \
+    --size="${HOT_SIZE}GB" --type=pd-balanced \
+    --labels=pawpad=true,tier=hot
 
 echo "==> Attaching new data disk (device-name=pawpad-data)..."
 gcloud compute instances attach-disk "${INSTANCE}" \
@@ -182,7 +195,7 @@ ssh_vm '
 
   # Restore data from tar (overwrites the empty mount).
   echo "  restoring /srv/pawpad-data from backup..."
-  sudo tar -xzf /tmp/pawpad-data-backup.tar.gz -C /
+  sudo tar -xzf /root/pawpad-data-backup.tar.gz -C /
   sudo chown -R pawpad:pawpad /srv/pawpad-data
 
   # Set up cold-disk subdirs + symlinks for _archived.
