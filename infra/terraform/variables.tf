@@ -19,14 +19,27 @@ variable "machine_type" {
 }
 
 variable "disk_size_gb" {
-  type    = number
-  default = 1024
+  type        = number
+  default     = 200
+  description = "Hot (SSD-class) data disk size in GB. Holds live workspaces, vault, sqlite."
 }
 
 variable "disk_type" {
   type        = string
   default     = "pd-balanced"
-  description = "pd-standard | pd-balanced | pd-ssd"
+  description = "Hot disk type — pd-standard | pd-balanced | pd-ssd"
+}
+
+variable "cold_disk_size_gb" {
+  type        = number
+  default     = 1000
+  description = "Cold (HDD) data disk size in GB. Holds _archived/ projects + vault. Set 0 to skip."
+}
+
+variable "cold_disk_type" {
+  type        = string
+  default     = "pd-standard"
+  description = "Cold disk type — usually pd-standard for cheap bulk storage"
 }
 
 variable "tailscale_authkey" {

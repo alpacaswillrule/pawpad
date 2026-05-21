@@ -12,7 +12,8 @@ User-facing communication happens entirely through Discord. The user can close t
 
 | Layer | Choice |
 |---|---|
-| Host | GCP Compute Engine, Ubuntu 24.04 LTS, user picks region/disk at install |
+| Host | GCP Compute Engine, Ubuntu 24.04 LTS, user picks region/disks at install |
+| Storage | Two-tier: **hot** pd-balanced SSD (default 200GB) for live workspaces; **cold** pd-standard HDD (default 1TB) for `_archived/`. Cold disk is optional — set `cold_disk_size_gb=0` for single-tier. |
 | Network | Tailscale-only (no public ports); SSH + Obsidian web served over tailnet |
 | Orchestrator | Python: `discord.py` + `claude-agent-sdk`, systemd-managed |
 | Agent | Claude Agent SDK with `permission_mode=bypassPermissions` |

@@ -46,10 +46,12 @@ def main() -> int:
     state.setdefault("gcp_region", "us-central1")
     state.setdefault("gcp_zone", "us-central1-a")
 
-    # 4. vm_specs — sensible defaults
+    # 4. vm_specs — sensible defaults (tiered storage: hot SSD + cold HDD)
     state.setdefault("machine_type", "e2-standard-4")
-    state.setdefault("disk_size_gb", 1024)
+    state.setdefault("disk_size_gb", 200)        # hot SSD
     state.setdefault("disk_type", "pd-balanced")
+    state.setdefault("cold_disk_size_gb", 1000)  # cold HDD
+    state.setdefault("cold_disk_type", "pd-standard")
 
     # 5. github — generate keypair + reuse gh token
     key_path = Path("~/.pawpad/vm_ssh_key").expanduser()

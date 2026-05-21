@@ -45,6 +45,8 @@ def _write_tfvars(state: dict) -> None:
         "machine_type": state["machine_type"],
         "disk_size_gb": state["disk_size_gb"],
         "disk_type": state["disk_type"],
+        "cold_disk_size_gb": state.get("cold_disk_size_gb", 1000),
+        "cold_disk_type": state.get("cold_disk_type", "pd-standard"),
         "tailscale_authkey": state["tailscale_authkey"],
         "ssh_user": "pawpad",
         "ssh_pub_key": state["ssh_pub_key"],

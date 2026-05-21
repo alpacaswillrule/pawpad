@@ -58,6 +58,45 @@ sudo -u ${pawpad_user} ln -sfn "$DATA_MOUNT/obsidian-vault" "$HOME_DIR/obsidian-
 sudo -u ${pawpad_user} mkdir -p "$HOME_DIR/.pawpad"
 sudo -u ${pawpad_user} ln -sfn "$DATA_MOUNT/pawpad-state" "$HOME_DIR/.pawpad-data"
 
+# --- mount cold (HDD) tier, if attached -------------------------------------
+# Cold disk holds _archived/ projects + vault. Hot SSD stays focused on
+# live workspaces where build cache I/O matters.
+
+COLD_DISK=/dev/disk/by-id/google-pawpad-cold
+COLD_MOUNT=/srv/pawpad-cold
+
+if [[ -e "$COLD_DISK" ]]; then
+  if ! blkid "$COLD_DISK" >/dev/null 2>&1; then
+    echo "formatting $COLD_DISK as ext4"
+    mkfs.ext4 -F "$COLD_DISK"
+  fi
+  COLD_UUID=$(blkid -s UUID -o value "$COLD_DISK")
+  mkdir -p "$COLD_MOUNT"
+  if ! grep -q "$COLD_UUID" /etc/fstab; then
+    echo "UUID=$COLD_UUID  $COLD_MOUNT  ext4  defaults,nofail  0 2" >> /etc/fstab
+  fi
+  mount "$COLD_MOUNT" || true
+  chown ${pawpad_user}:${pawpad_user} "$COLD_MOUNT"
+  sudo -u ${pawpad_user} mkdir -p \
+    "$COLD_MOUNT/archived-projects" \
+    "$COLD_MOUNT/archived-vault"
+
+  # Symlink _archived into the cold mount, but only if it doesn't already
+  # exist as a non-empty real dir (don't clobber data on retrofits).
+  for pair in \
+    "$DATA_MOUNT/projects/_archived:$COLD_MOUNT/archived-projects" \
+    "$DATA_MOUNT/obsidian-vault/_archived:$COLD_MOUNT/archived-vault" \
+  ; do
+    src="$${pair%%:*}"
+    tgt="$${pair##*:}"
+    if [[ -L "$src" ]] || [[ ! -e "$src" ]]; then
+      sudo -u ${pawpad_user} ln -sfn "$tgt" "$src"
+    else
+      echo "skipping symlink $src — directory already exists (manual migration needed)"
+    fi
+  done
+fi
+
 # --- install system packages -------------------------------------------------
 
 apt-get update

@@ -11,7 +11,10 @@
               │ Tailscale
               ▼
 ┌────────────────────────────────────────────────────┐
-│  GCP VM (Ubuntu 24.04, 4 vCPU, 16 GB, 1 TB disk)   │
+│  GCP VM (Ubuntu 24.04, 4 vCPU, 16 GB)              │
+│  Storage:                                          │
+│    /srv/pawpad-data  ← 200GB SSD (live workspaces) │
+│    /srv/pawpad-cold  ← 1TB HDD  (_archived/)       │
 │                                                     │
 │  ┌────────────────────────────────────────────┐    │
 │  │ systemd: jojo-bot.service                  │    │

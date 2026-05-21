@@ -51,6 +51,22 @@ resource "google_compute_disk" "data" {
 
   labels = {
     pawpad = "true"
+    tier   = "hot"
+  }
+
+  depends_on = [google_project_service.compute]
+}
+
+resource "google_compute_disk" "cold" {
+  count = var.cold_disk_size_gb > 0 ? 1 : 0
+  name  = "${var.instance_name}-cold"
+  type  = var.cold_disk_type
+  zone  = var.gcp_zone
+  size  = var.cold_disk_size_gb
+
+  labels = {
+    pawpad = "true"
+    tier   = "cold"
   }
 
   depends_on = [google_project_service.compute]
@@ -89,6 +105,15 @@ resource "google_compute_instance" "pawpad" {
     source      = google_compute_disk.data.self_link
     device_name = "pawpad-data"
     mode        = "READ_WRITE"
+  }
+
+  dynamic "attached_disk" {
+    for_each = var.cold_disk_size_gb > 0 ? [1] : []
+    content {
+      source      = google_compute_disk.cold[0].self_link
+      device_name = "pawpad-cold"
+      mode        = "READ_WRITE"
+    }
   }
 
   network_interface {

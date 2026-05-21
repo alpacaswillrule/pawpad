@@ -23,3 +23,8 @@ output "tailnet_hostname" {
 output "data_disk_name" {
   value = google_compute_disk.data.name
 }
+
+output "cold_disk_name" {
+  description = "Cold (HDD) disk name, or empty if not provisioned."
+  value       = length(google_compute_disk.cold) > 0 ? google_compute_disk.cold[0].name : ""
+}
