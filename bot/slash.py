@@ -133,6 +133,47 @@ def register_slash_commands(tree: app_commands.CommandTree, bot: "PawpadBot") ->
         await interaction.followup.send("archived. session removed; channel preserved.")
 
     @tree.command(
+        name="clone",
+        description="Replace this channel's workspace with a clone of an existing repo.",
+    )
+    @app_commands.describe(
+        repo_url="HTTPS or SSH URL of the repo to clone (e.g. https://github.com/foo/bar)"
+    )
+    async def clone_cmd(interaction: discord.Interaction, repo_url: str) -> None:
+        cid = interaction.channel_id
+        if cid is None or cid not in bot.sessions.sessions:
+            await interaction.response.send_message(
+                "no session bound to this channel.", ephemeral=True
+            )
+            return
+        session = bot.sessions.sessions[cid]
+        if session.is_thread:
+            await interaction.response.send_message(
+                "/clone only works in channel sessions, not threads. "
+                "Threads inherit the parent channel's repo as a worktree.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+        try:
+            await bot.sessions.clone_into_workspace(session, repo_url.strip())
+        except Exception as exc:
+            await interaction.followup.send(
+                f"clone failed: `{exc}`", ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            f"replaced workspace with clone of <{repo_url}>.\n"
+            f"workspace: `{session.workspace}`\n"
+            f"the empty repo at `github.com/{bot.sessions.gh_owner}/{session.workspace.name}` "
+            f"is still there — delete it manually if you want "
+            f"(`gh repo delete --yes {bot.sessions.gh_owner}/{session.workspace.name}` over SSH).\n\n"
+            f"send a message to start a fresh agent session in the clone."
+        )
+
+    @tree.command(
         name="claude-instructions",
         description="Append instructions to this channel's CLAUDE.md (prefix with `global ` for VM-wide).",
     )

@@ -95,6 +95,7 @@ Any user in the guild who can post in a watched channel can interact with the bo
 | `/archive` | Archive workspace + Obsidian folder + stop agent, but leave Discord channel intact. |
 | `/claude-instructions "..."` | Append instructions to this channel's CLAUDE.md (in `~/projects/{slug}/CLAUDE.md`). Agent picks them up on next turn. |
 | `/claude-instructions global "..."` | Append to VM-wide CLAUDE.md (affects every channel's agent). |
+| `/clone <repo-url>` | Replace this channel's workspace with a `git clone` of an existing repo. Refuses if the workspace has uncommitted changes or any commits beyond the initial scaffold. Drops the SDK session_id so the next message starts a fresh agent in the clone. The empty `alpacaswillrule/{slug}` repo created at channel-init is **not** auto-deleted — operator deletes manually via `gh repo delete` if wanted. Only valid in channel sessions, not threads. |
 
 Deferred to v1.1+: `/handoff` (manual SSH takeover), `/verbose <level>`, multi-user authorization scoping.
 

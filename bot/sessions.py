@@ -845,6 +845,54 @@ class SessionManager:
 
     # ---- scaffolding -------------------------------------------------------
 
+    async def clone_into_workspace(
+        self, session: ChannelSession, repo_url: str
+    ) -> None:
+        """Replace this channel's workspace with a clone of `repo_url`.
+
+        Pauses the session, runs scripts/clone-project.sh (which refuses if
+        the workspace has uncommitted changes or commits beyond the initial
+        scaffold), then updates session.repo_url and clears any cached SDK
+        client + session_id so the next message starts fresh in the new tree.
+        """
+        if session.is_thread:
+            raise ValueError("/clone is only valid in channel sessions, not threads")
+
+        # Pause the live SDK client (releases the slot, keeps state).
+        await self.pause(session.channel_id)
+        # Drop the stored session_id — a clone is a hard context reset, the
+        # old session's history references files that no longer exist.
+        session.session_id = None
+        await self._forget_session_id(session.channel_id)
+
+        env = {
+            "HOME": str(Path.home()),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "GH_OWNER": self.gh_owner,
+            "WORKSPACES_ROOT": str(self.workspaces_root),
+            "VAULT_ROOT": str(self.vault_root),
+        }
+        script = self.scripts_root / "clone-project.sh"
+        slug = slugify(session.channel_name)
+        proc = await asyncio.create_subprocess_exec(
+            str(script), slug, repo_url,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise RuntimeError("clone timed out after 3 minutes") from None
+        if proc.returncode != 0:
+            raise RuntimeError(err.decode()[:600] or "clone failed")
+
+        session.repo_url = repo_url
+        # Re-enable the session — next message starts a fresh agent in the clone.
+        session.state = "closed"
+
     async def _scaffold_thread_worktree(
         self,
         *,
